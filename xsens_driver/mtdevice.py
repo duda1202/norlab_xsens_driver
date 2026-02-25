@@ -21,7 +21,8 @@ class MTDevice(object):
     """XSens MT device communication object."""
 
     def __init__(self, port, baudrate=115200, timeout=0.002, autoconf=True,
-                 config_mode=False, verbose=False, initial_wait=0.1):
+                 config_mode=False, verbose=False, initial_wait=0.1,
+                 read_chunk_size=512):
         """Open device."""
         self.verbose = verbose
         # serial interface to the device
@@ -36,6 +37,8 @@ class MTDevice(object):
         time.sleep(initial_wait)  # open returns before device is ready
         self.device.flushInput()
         self.device.flushOutput()
+        self._rx_buf = bytearray()
+        self.read_chunk_size = max(64, int(read_chunk_size))
         # timeout for communication
         self.timeout = 100*timeout
         # state of the device
@@ -57,6 +60,24 @@ class MTDevice(object):
     ############################################################
     # Low-level communication
     ############################################################
+    def _bytes_waiting(self):
+        try:
+            return int(self.device.in_waiting)
+        except AttributeError:
+            try:
+                return int(self.device.inWaiting())
+            except Exception:
+                return 0
+
+    def _read_from_serial(self):
+        pending = self._bytes_waiting()
+        if pending > 0:
+            read_size = min(self.read_chunk_size, pending)
+        else:
+            # avoid tiny fallback reads when in_waiting briefly returns 0
+            read_size = self.read_chunk_size
+        return self.device.read(read_size)
+
     def write_msg(self, mid, data=b''):
         """Low-level message sending function."""
         length = len(data)
@@ -68,8 +89,12 @@ class MTDevice(object):
         packet += struct.pack('!B', 0xFF & (-(sum(packet[1:]))))
         msg = packet
         start = time.time()
-        while ((time.time()-start) < self.timeout) and self.device.read():
-            pass
+        self._rx_buf.clear()
+        while (time.time()-start) < self.timeout:
+            pending = self._bytes_waiting()
+            if pending <= 0:
+                break
+            self.device.read(min(self.read_chunk_size, pending))
         try:
             self.device.write(msg)
         except serial.serialutil.SerialTimeoutException:
@@ -81,14 +106,22 @@ class MTDevice(object):
 
     def waitfor(self, size=1):
         """Get a given amount of data."""
-        buf = bytearray()
-        for _ in range(100):
-            buf.extend(self.device.read(size-len(buf)))
-            if len(buf) == size:
-                return buf
+        deadline = time.time() + self.timeout
+        while len(self._rx_buf) < size:
+            chunk = self._read_from_serial()
+            if chunk:
+                self._rx_buf.extend(chunk)
+                continue
+            if time.time() >= deadline:
+                break
             if self.verbose:
                 print("waiting for %d bytes, got %d so far: [%s]" % \
-                    (size, len(buf), ' '.join('%02X' % v for v in buf)))
+                    (size, len(self._rx_buf),
+                     ' '.join('%02X' % v for v in self._rx_buf)))
+        if len(self._rx_buf) >= size:
+            out = self._rx_buf[:size]
+            del self._rx_buf[:size]
+            return out
         raise MTTimeoutException("waiting for message")
 
     def read_data_msg(self, buf=bytearray()):
@@ -130,37 +163,77 @@ class MTDevice(object):
 
     def read_msg(self):
         """Low-level message receiving function."""
-        start = time.time()
-        while (time.time()-start) < self.timeout:
-            # first part of preamble
-            if ord(self.waitfor()) != 0xFA:
+        deadline = time.time() + self.timeout
+        preamble = b'\xFA\xFF'
+
+        while time.time() < deadline:
+            if len(self._rx_buf) < 4:
+                chunk = self._read_from_serial()
+                if chunk:
+                    self._rx_buf.extend(chunk)
+                    continue
                 continue
-            # second part of preamble
-            if ord(self.waitfor()) != 0xFF:  # we assume no timeout anymore
-                continue
-            # read message id and length of message
-            mid, length = struct.unpack('!BB', self.waitfor(2))
-            if length == 255:    # extended length
-                length, = struct.unpack('!H', self.waitfor(2))
-            # read contents and checksum
-            buf = self.waitfor(length+1)
-            checksum = buf[-1]
-            data = struct.unpack('!%dB' % length, buf[:-1])
-            # check message integrity
-            if 0xFF & sum(data, 0xFF+mid+length+checksum):
+
+            preamble_ind = self._rx_buf.find(preamble)
+            if preamble_ind == -1:
                 if self.verbose:
-                    sys.stderr.write("invalid checksum; discarding data and "
-                                     "waiting for next message.\n")
+                    sys.stderr.write("invalid preamble; discarding buffered data.\n")
+                if len(self._rx_buf) > 1:
+                    del self._rx_buf[:-1]
+                chunk = self._read_from_serial()
+                if chunk:
+                    self._rx_buf.extend(chunk)
                 continue
+            if preamble_ind > 0:
+                if self.verbose:
+                    sys.stderr.write("discarding bytes before preamble.\n")
+                del self._rx_buf[:preamble_ind]
+
+            if len(self._rx_buf) < 4:
+                chunk = self._read_from_serial()
+                if chunk:
+                    self._rx_buf.extend(chunk)
+                continue
+
+            mid = self._rx_buf[2]
+            length_byte = self._rx_buf[3]
+            header_len = 4
+            if length_byte == 255:
+                if len(self._rx_buf) < 6:
+                    chunk = self._read_from_serial()
+                    if chunk:
+                        self._rx_buf.extend(chunk)
+                    continue
+                length = struct.unpack('!H', self._rx_buf[4:6])[0]
+                header_len = 6
+            else:
+                length = length_byte
+
+            total_len = header_len + length + 1
+            if len(self._rx_buf) < total_len:
+                chunk = self._read_from_serial()
+                if chunk:
+                    self._rx_buf.extend(chunk)
+                continue
+
+            frame = self._rx_buf[:total_len]
+            del self._rx_buf[:total_len]
+
+            if 0xFF & sum(frame[1:]):
+                if self.verbose:
+                    sys.stderr.write("invalid checksum; discarding frame.\n")
+                continue
+
+            data_buf = frame[header_len:-1]
             if self.verbose:
                 print("MT: Got message id 0x%02X (%s) with %d data bytes: "\
                       "[%s]" % (mid, getMIDName(mid), length,
-                                ' '.join("%02X" % v for v in data)))
+                                ' '.join("%02X" % v for v in data_buf)))
             if mid == MID.Error:
-                raise MTErrorMessage(data[0])
-            return (mid, buf[:-1])
-        else:
-            raise MTException("could not find message.")
+                raise MTErrorMessage(data_buf[0])
+            return (mid, bytearray(data_buf))
+
+        raise MTException("could not find message.")
 
     def write_ack(self, mid, data=b'', n_resend=30, n_read=25):
         """Send a message and read confirmation."""

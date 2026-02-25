@@ -28,6 +28,7 @@ class XSensDriver(rclpy.node.Node):
         baudrate = self.get_param('baudrate', 0)
         timeout = self.get_param('timeout', 0.002)
         initial_wait = self.get_param('initial_wait', 0.1)
+        read_chunk_size = self.get_param('read_chunk_size', 512)
         self.enable_diagnostics = self.get_param('enable_diagnostics', True)
         if device == 'auto':
             devs = mtdevice.find_devices(timeout=timeout, initial_wait=initial_wait)
@@ -44,7 +45,9 @@ class XSensDriver(rclpy.node.Node):
             sys.exit(1)
 
         self.get_logger().info("MT node interface: %s at %d bd." % (device, baudrate))
-        self.mt = mtdevice.MTDevice(device, baudrate, timeout, initial_wait=initial_wait)
+        self.mt = mtdevice.MTDevice(
+            device, baudrate, timeout, initial_wait=initial_wait,
+            read_chunk_size=read_chunk_size)
 
         # optional no rotation procedure for internal calibration of biases
         # (only mark iv devices)

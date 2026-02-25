@@ -5,6 +5,7 @@
     <arg name="baudrate" default="0"/>
     <arg name="timeout" default="0.002"/>
     <arg name="initial_wait" default="0.1"/>
+    <arg name="read_chunk_size" default="512"/>
     <arg name="frame_id" default="/imu"/>
     <arg name="frame_local" default="ENU"/>
     <arg name="no_rotation_duration" default="0"/>
@@ -19,6 +20,7 @@
         <param name="baudrate" value="$(var baudrate)"/>
         <param name="timeout" value="$(var timeout)"/>
         <param name="initial_wait" value="$(var initial_wait)"/>
+        <param name="read_chunk_size" value="$(var read_chunk_size)"/>
         <param name="frame_id" value="$(var frame_id)"/>
         <param name="frame_local" value="$(var frame_local)"/>
         <param name="no_rotation_duration" value="$(var no_rotation_duration)"/>

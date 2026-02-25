@@ -70,13 +70,9 @@ class MTDevice(object):
                 return 0
 
     def _read_from_serial(self):
-        pending = self._bytes_waiting()
-        if pending > 0:
-            read_size = min(self.read_chunk_size, pending)
-        else:
-            # avoid tiny fallback reads when in_waiting briefly returns 0
-            read_size = self.read_chunk_size
-        return self.device.read(read_size)
+        # Request fixed-size chunks so pyserial can aggregate bytes over timeout
+        # instead of forcing many tiny reads based on transient in_waiting values.
+        return self.device.read(self.read_chunk_size)
 
     def write_msg(self, mid, data=b''):
         """Low-level message sending function."""

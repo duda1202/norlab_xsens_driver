@@ -229,7 +229,9 @@ class MTDevice(object):
                 raise MTErrorMessage(data_buf[0])
             return (mid, bytearray(data_buf))
 
-        raise MTException("could not find message.")
+        # During normal streaming, short read gaps are expected.
+        # Surface this as a timeout so mtnode can retry instead of crashing.
+        raise MTTimeoutException("could not find message.")
 
     def write_ack(self, mid, data=b'', n_resend=30, n_read=25):
         """Send a message and read confirmation."""
